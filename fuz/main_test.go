@@ -26,32 +26,47 @@ const (
 )
 
 type DummyTx struct {
-	account testutils.Account
-	accountIdx int64
-	nonce uint8
-	numberMsgs uint8
-	timeout uint64
-	gasLimit uint64
-	fees uint64
+	accountIdx uint16
+	nonce uint16
+	numberMsgs uint16
+	timeout uint16
+	gasLimit uint16
+	fees uint16
 }
 
 func FuzzReverse(f *testing.F) {
+	dummyTxSize := int(unsafe.Sizeof(DummyTx{}))
 	accounts := testutils.RandomAccounts(rand.New(rand.NewSource(1)), ACCT_CNT)
+	seed := make([]byte, dummyTxSize * TX_CNT)
+	rand.Read(seed)
+	f.Add(seed)
 
 	f.Fuzz(func(t *testing.T, data []byte) {
-		if len(data) < int(unsafe.Sizeof(DummyTx{})) * TX_CNT {
+		if len(data) < dummyTxSize * TX_CNT {
 			return
 		}
-		fuzzConsumer := fuzz.NewConsumer(data)
 		acct := make([]DummyTx, TX_CNT)
+		//acctx := &DummyTx{}
+		fuzzConsumer := fuzz.NewConsumer(data)
 		for i := 0; i < TX_CNT; i++ {
-			err := fuzzConsumer.GenerateStruct(&acct[i])
-			if err != nil {
-				return
-			}
+			//fuzzConsumer := fuzz.NewConsumer(data[i * dummyTxSize : (i + 1) * dummyTxSize])
+			//err := fuzzConsumer.GenerateStruct(&acct[i])
+			//err = fuzzConsumer.GenerateStruct(&seed)
+			//if err != nil {
+			//	return
+			//}
+			acct[i].accountIdx, _ = fuzzConsumer.GetUint16()
+			acct[i].nonce, _ = fuzzConsumer.GetUint16()
+			acct[i].numberMsgs, _ = fuzzConsumer.GetUint16()
+			acct[i].timeout, _ = fuzzConsumer.GetUint16()
+			acct[i].gasLimit, _ = fuzzConsumer.GetUint16()
+			acct[i].fees, _ = fuzzConsumer.GetUint16()
 			t.Log(acct[i])
-			acct[i].account = accounts[acct[i].accountIdx % ACCT_CNT]
+			//t.Log(acctx)
+			//t.Log(seed)
+			//t.Log(data[i * dummyTxSize : (i + 1) * dummyTxSize])
 		}
+		//t.Log(data)
 		encodingConfig := testutils.CreateTestEncodingConfig()
 
 		logger := log.NewNopLogger()
@@ -69,14 +84,14 @@ func FuzzReverse(f *testing.F) {
 		for i := 0; i < TX_CNT; i++ {
 			tx, err := testutils.CreateRandomTx(
 				encodingConfig.TxConfig,
-				acct[i].account,
+				accounts[acct[i].accountIdx % ACCT_CNT],
 				//uint64(i),
 				uint64(acct[i].nonce),
 				uint64(acct[i].numberMsgs),
-				acct[i].timeout,
-				acct[i].gasLimit,
-				sdk.NewCoin("stake", math.NewInt(int64(i))),
-				//sdk.NewCoin("stake", math.NewInt(int64(acct[i].fees))),
+				uint64(acct[i].timeout),
+				uint64(acct[i].gasLimit),
+				//sdk.NewCoin("stake", math.NewInt(int64(i))),
+				sdk.NewCoin("stake", math.NewInt(int64(acct[i].fees))),
 			)
 			if err != nil {
 				continue
