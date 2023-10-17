@@ -46,27 +46,16 @@ func FuzzReverse(f *testing.F) {
 			return
 		}
 		acct := make([]DummyTx, TX_CNT)
-		//acctx := &DummyTx{}
 		fuzzConsumer := fuzz.NewConsumer(data)
 		for i := 0; i < TX_CNT; i++ {
-			//fuzzConsumer := fuzz.NewConsumer(data[i * dummyTxSize : (i + 1) * dummyTxSize])
-			//err := fuzzConsumer.GenerateStruct(&acct[i])
-			//err = fuzzConsumer.GenerateStruct(&seed)
-			//if err != nil {
-			//	return
-			//}
+			//fuzzConsumer.GenerateStruct(&acct[i])
 			acct[i].accountIdx, _ = fuzzConsumer.GetUint16()
 			acct[i].nonce, _ = fuzzConsumer.GetUint16()
 			acct[i].numberMsgs, _ = fuzzConsumer.GetUint16()
 			acct[i].timeout, _ = fuzzConsumer.GetUint16()
 			acct[i].gasLimit, _ = fuzzConsumer.GetUint16()
 			acct[i].fees, _ = fuzzConsumer.GetUint16()
-			t.Log(acct[i])
-			//t.Log(acctx)
-			//t.Log(seed)
-			//t.Log(data[i * dummyTxSize : (i + 1) * dummyTxSize])
 		}
-		//t.Log(data)
 		encodingConfig := testutils.CreateTestEncodingConfig()
 
 		logger := log.NewNopLogger()
@@ -85,12 +74,10 @@ func FuzzReverse(f *testing.F) {
 			tx, err := testutils.CreateRandomTx(
 				encodingConfig.TxConfig,
 				accounts[acct[i].accountIdx % ACCT_CNT],
-				//uint64(i),
 				uint64(acct[i].nonce),
 				uint64(acct[i].numberMsgs),
 				uint64(acct[i].timeout),
 				uint64(acct[i].gasLimit),
-				//sdk.NewCoin("stake", math.NewInt(int64(i))),
 				sdk.NewCoin("stake", math.NewInt(int64(acct[i].fees))),
 			)
 			if err != nil {
