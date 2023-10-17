@@ -1,6 +1,7 @@
 package fuz
 
 import (
+	"unsafe"
 	"cosmossdk.io/log"
 	"cosmossdk.io/math"
 	storetypes "cosmossdk.io/store/types"
@@ -14,14 +15,43 @@ import (
 	"github.com/skip-mev/block-sdk/block/base"
 	defaultlane "github.com/skip-mev/block-sdk/lanes/base"
 	testutils "github.com/skip-mev/block-sdk/testutils"
+	fuzz "github.com/AdaLogics/go-fuzz-headers"
 	"math/rand"
 	"testing"
 )
 
-func FuzzSDK(f *testing.F) {
-	accounts := testutils.RandomAccounts(rand.New(rand.NewSource(1)), 100)
+const (
+	ACCT_CNT = 5
+	TX_CNT = 5
+)
+
+type DummyTx struct {
+	account testutils.Account
+	accountIdx int64
+	nonce uint8
+	numberMsgs uint8
+	timeout uint64
+	gasLimit uint64
+	fees uint64
+}
+
+func FuzzReverse(f *testing.F) {
+	accounts := testutils.RandomAccounts(rand.New(rand.NewSource(1)), ACCT_CNT)
 
 	f.Fuzz(func(t *testing.T, data []byte) {
+		if len(data) < int(unsafe.Sizeof(DummyTx{})) * TX_CNT {
+			return
+		}
+		fuzzConsumer := fuzz.NewConsumer(data)
+		acct := make([]DummyTx, TX_CNT)
+		for i := 0; i < TX_CNT; i++ {
+			err := fuzzConsumer.GenerateStruct(&acct[i])
+			if err != nil {
+				return
+			}
+			t.Log(acct[i])
+			acct[i].account = accounts[acct[i].accountIdx % ACCT_CNT]
+		}
 		encodingConfig := testutils.CreateTestEncodingConfig()
 
 		logger := log.NewNopLogger()
@@ -36,21 +66,17 @@ func FuzzSDK(f *testing.F) {
 
 		defaultLane := defaultlane.NewDefaultLane(cfg)
 
-		if len(data) < 26 {
-			return
-		}
-
-		for i := 0; i < int(data[0])%5; i++ {
-			idx := i*4 + 1
-
+		for i := 0; i < TX_CNT; i++ {
 			tx, err := testutils.CreateRandomTx(
 				encodingConfig.TxConfig,
-				accounts[int(data[idx])%len(accounts)],
-				uint64(data[idx]),
-				uint64(data[idx+1]),
-				uint64(data[idx+2]),
-				uint64(data[idx+3]),
-				sdk.NewCoin("stake", math.NewInt(int64(data[idx+4]))),
+				acct[i].account,
+				//uint64(i),
+				uint64(acct[i].nonce),
+				uint64(acct[i].numberMsgs),
+				acct[i].timeout,
+				acct[i].gasLimit,
+				sdk.NewCoin("stake", math.NewInt(int64(i))),
+				//sdk.NewCoin("stake", math.NewInt(int64(acct[i].fees))),
 			)
 			if err != nil {
 				continue

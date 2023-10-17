@@ -2,7 +2,7 @@ module fuz
 
 go 1.21.3
 
-replace github.com/skip-mev/block-sdk => ./block-sdk
+replace github.com/skip-mev/block-sdk => ../block-sdk
 
 require (
 	cosmossdk.io/log v1.2.1
@@ -22,6 +22,7 @@ require (
 	filippo.io/edwards25519 v1.0.0 // indirect
 	github.com/99designs/go-keychain v0.0.0-20191008050251-8e49817e8af4 // indirect
 	github.com/99designs/keyring v1.2.1 // indirect
+	github.com/AdaLogics/go-fuzz-headers v0.0.0-20230811130428-ced1acdcaa24 // indirect
 	github.com/DataDog/zstd v1.5.5 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bgentry/speakeasy v0.1.1-0.20220910012023-760eaf8b6816 // indirect
