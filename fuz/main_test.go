@@ -18,6 +18,7 @@ import (
 	fuzz "github.com/AdaLogics/go-fuzz-headers"
 	"math/rand"
 	"testing"
+	"reflect"
 )
 
 const (
@@ -68,7 +69,34 @@ func FuzzReverse(f *testing.F) {
 			SignerExtractor: signeradaptors.NewDefaultAdapter(),
 		}
 
-		defaultLane := defaultlane.NewDefaultLane(cfg)
+		//Sort in priority nonce should be strictly ordered and deterministic
+		//This means that two copies of lanes should always produce same ordering when same txs are inserted
+		//(should also not depend on insertion order, since we require strict ordering and no ties after all tiebreakers are applied)
+
+		defaultLane1 := defaultlane.NewDefaultLane(cfg)
+		defaultLane2 := defaultlane.NewDefaultLane(cfg)
+
+
+		//one exception that makes insertion order matter is when two txs from same sender with same sequence is sent
+		//the latter one will override previous one in this case, which we want to avoid, so adjust sequence here for simplicity
+		var seen map[uint16]map[uint16]bool = make(map[uint16]map[uint16]bool)
+		for i := 0; i < TX_CNT; i++ {
+			acct[i].accountIdx %= ACCT_CNT
+			idxMap, ok := seen[acct[i].accountIdx]
+			if !ok {
+				seen[acct[i].accountIdx] = make(map[uint16]bool)
+				idxMap = seen[acct[i].accountIdx]
+			}
+			if _, ok = idxMap[acct[i].nonce]; ok {
+				for k := 0; k <= 65535; k++ {
+					if _, ok = idxMap[uint16(k)]; !ok {
+						acct[i].nonce = uint16(k)
+						break
+					}
+				}
+			}
+			idxMap[acct[i].nonce] = true
+		}
 
 		for i := 0; i < TX_CNT; i++ {
 			tx, err := testutils.CreateRandomTx(
@@ -83,15 +111,43 @@ func FuzzReverse(f *testing.F) {
 			if err != nil {
 				continue
 			}
-			if err = defaultLane.Insert(sdk.Context{}, tx); err != nil {
+			if err = defaultLane1.Insert(sdk.Context{}, tx); err != nil {
 				t.Errorf("unexpected insertion error")
 			}
 		}
 
-		mempool := block.NewLanedMempool(logger, false, defaultLane)
+		for i := TX_CNT - 1; i >= 0; i-- {
+			tx, err := testutils.CreateRandomTx(
+				encodingConfig.TxConfig,
+				accounts[acct[i].accountIdx % ACCT_CNT],
+				uint64(acct[i].nonce),
+				uint64(acct[i].numberMsgs),
+				uint64(acct[i].timeout),
+				uint64(acct[i].gasLimit),
+				sdk.NewCoin("stake", math.NewInt(int64(acct[i].fees))),
+			)
+			if err != nil {
+				continue
+			}
+			if err = defaultLane2.Insert(sdk.Context{}, tx); err != nil {
+				t.Errorf("unexpected insertion error")
+			}
+		}
 
-		ctx := testutil.DefaultContextWithDB(t, storetypes.NewKVStoreKey("test"), storetypes.NewTransientStoreKey("transient_test")).Ctx.WithIsCheckTx(true)
-		ctx = ctx.WithConsensusParams(
+		mempool1 := block.NewLanedMempool(logger, false, defaultLane1)
+		mempool2 := block.NewLanedMempool(logger, false, defaultLane2)
+
+		ctx1 := testutil.DefaultContextWithDB(t, storetypes.NewKVStoreKey("test1"), storetypes.NewTransientStoreKey("transient_test1")).Ctx.WithIsCheckTx(true)
+		ctx1 = ctx1.WithConsensusParams(
+			tmprototypes.ConsensusParams{
+				Block: &tmprototypes.BlockParams{
+					MaxBytes: 1000000000000,
+					MaxGas:   1000000000000,
+				},
+			},
+		)
+		ctx2 := testutil.DefaultContextWithDB(t, storetypes.NewKVStoreKey("test2"), storetypes.NewTransientStoreKey("transient_test2")).Ctx.WithIsCheckTx(true)
+		ctx2 = ctx2.WithConsensusParams(
 			tmprototypes.ConsensusParams{
 				Block: &tmprototypes.BlockParams{
 					MaxBytes: 1000000000000,
@@ -100,24 +156,42 @@ func FuzzReverse(f *testing.F) {
 			},
 		)
 
-		proposalHandler := abci.NewProposalHandler(
+		proposalHandler1 := abci.NewProposalHandler(
 			logger,
 			encodingConfig.TxConfig.TxDecoder(),
 			encodingConfig.TxConfig.TxEncoder(),
-			mempool,
+			mempool1,
 		)
-		prepareProposalHandler := proposalHandler.PrepareProposalHandler()
-		processProposalHandler := proposalHandler.ProcessProposalHandler()
+		proposalHandler2 := abci.NewProposalHandler(
+			logger,
+			encodingConfig.TxConfig.TxDecoder(),
+			encodingConfig.TxConfig.TxEncoder(),
+			mempool2,
+		)
+		prepareProposalHandler1 := proposalHandler1.PrepareProposalHandler()
+		prepareProposalHandler2 := proposalHandler2.PrepareProposalHandler()
 
-		resp, err := prepareProposalHandler(ctx, &cometabci.RequestPrepareProposal{Height: 2})
-		if err != nil {
-			t.Errorf("bad prepare: %q", err)
+		resp1, prepErr1 := prepareProposalHandler1(ctx1, &cometabci.RequestPrepareProposal{Height: 2})
+		if prepErr1 != nil {
+			t.Errorf("bad prepare: %q", prepErr1)
 		}
-
-		resp2, err := processProposalHandler(ctx, &cometabci.RequestProcessProposal{Txs: resp.Txs, Height: 2})
-		if err != nil || resp2.Status != cometabci.ResponseProcessProposal_ACCEPT {
-			t.Errorf("bad process")
+		resp2, prepErr2 := prepareProposalHandler2(ctx2, &cometabci.RequestPrepareProposal{Height: 2})
+		if prepErr2 != nil {
+			t.Errorf("bad prepare: %q", prepErr2)
 		}
-
+		if len(resp1.Txs) != len(resp2.Txs) {
+			t.Errorf("proposal mismatched")
+		}
+		for i := 0; i < len(resp1.Txs); i++ {
+		}
+		if !reflect.DeepEqual(resp1.Txs, resp2.Txs) {
+			for i := 0; i < len(resp1.Txs); i++ {
+				t.Log(encodingConfig.TxConfig.TxDecoder()(resp1.Txs[i]))
+			}
+			for i := 0; i < len(resp2.Txs); i++ {
+				t.Log(encodingConfig.TxConfig.TxDecoder()(resp2.Txs[i]))
+			}
+			t.Errorf("proposal mismatched")
+		}
 	})
 }
