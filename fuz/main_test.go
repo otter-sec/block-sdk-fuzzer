@@ -1,6 +1,8 @@
 package fuz
 
 import (
+	"errors"
+	"context"
 	"unsafe"
 	"cosmossdk.io/log"
 	sdkmath "cosmossdk.io/math"
@@ -14,11 +16,9 @@ import (
 	signeradaptors "github.com/skip-mev/block-sdk/adapters/signer_extraction_adapter"
 	"github.com/skip-mev/block-sdk/block"
 	"github.com/skip-mev/block-sdk/block/base"
-	defaultlane "github.com/skip-mev/block-sdk/lanes/base"
 	testutils "github.com/skip-mev/block-sdk/testutils"
 	fuzz "github.com/AdaLogics/go-fuzz-headers"
 	"time"
-	"math"
 	"math/rand"
 	"testing"
 	"reflect"
@@ -27,7 +27,7 @@ import (
 const (
 	ACCT_CNT = 5
 	TX_CNT = 5
-	COPIES = 2
+	VARIATIONS = 2
 )
 
 type DummyTx struct {
@@ -39,11 +39,89 @@ type DummyTx struct {
 	fees uint16
 }
 
+type DummyPriority struct {
+	priority uint16
+}
+
+//Allow easily manipulation of tx priorities
+type DynamicContext struct {
+	DynamicPriority map[string]map[uint64]uint16
+}
+
+type DynamicPriorityLane struct {
+	*base.BaseLane
+}
+
+func getTxSenderInfo(tx sdk.Tx) (string, uint64, error) {
+	signers, err := signeradaptors.NewDefaultAdapter().GetSigners(tx)
+	if err != nil || len(signers) == 0 {
+		return "", 0, errors.New("fetch signer failed")
+	}
+	signer := signers[0]
+	return signer.Signer.String(), signer.Sequence, nil
+}
+
+func DynamicTxPriority(ctx DynamicContext, t *testing.T) base.TxPriority[uint16] {
+	return base.TxPriority[uint16]{
+		GetTxPriority: func(goCtx context.Context, tx sdk.Tx) uint16 {
+			sender, sequence, err := getTxSenderInfo(tx)
+			if err != nil {
+				t.Errorf("unexpected getTxSenderInfo error")
+				return 0
+			}
+			senderPriorities, ok := ctx.DynamicPriority[sender]
+			if !ok {
+				t.Errorf("unexpected get dynamicPriority error (sender)")
+				return 0
+			}
+			priority, ok := senderPriorities[sequence]
+			if !ok {
+				t.Errorf("unexpected get dynamicPriority error (sequence)")
+				return 0
+			}
+			return priority
+		},
+		Compare: func(a, b uint16) int {
+			if a == b {
+				return 0
+			} else if a > b {
+				return 1
+			} else {
+				return -1
+			}
+		},
+		MinValue: 0,
+	}
+}
+
+func NewDynamicPriorityLane(cfg base.LaneConfig, ctx DynamicContext, t *testing.T) *DynamicPriorityLane {
+	lane := base.NewBaseLane(
+		cfg,
+		"dynamic",
+		base.NewMempool[uint16](
+			DynamicTxPriority(ctx, t),
+			cfg.TxEncoder,
+			cfg.SignerExtractor,
+			cfg.MaxTxs,
+		),
+		base.DefaultMatchHandler(),
+	)
+
+	if err := lane.ValidateBasic(); err != nil {
+		panic(err)
+	}
+
+	return &DynamicPriorityLane{
+		BaseLane: lane,
+	}
+}
+
 func FuzzReverse(f *testing.F) {
 	rand.Seed(time.Now().UnixNano())
 	dummyTxSize := int(unsafe.Sizeof(DummyTx{}))
+	dummyPrioritySize := int(unsafe.Sizeof(DummyPriority{}))
 	accounts := testutils.RandomAccounts(rand.New(rand.NewSource(1)), ACCT_CNT)
-	seed := make([]byte, dummyTxSize * TX_CNT)
+	seed := make([]byte, dummyTxSize * TX_CNT + dummyPrioritySize * TX_CNT * VARIATIONS)
 	rand.Read(seed)
 	f.Add(seed)
 
@@ -51,7 +129,8 @@ func FuzzReverse(f *testing.F) {
 		if len(data) < dummyTxSize * TX_CNT {
 			return
 		}
-		acct := make([]DummyTx, TX_CNT)
+		acct := [TX_CNT]DummyTx{}
+		priorities := [TX_CNT][VARIATIONS]DummyPriority{}
 		fuzzConsumer := fuzz.NewConsumer(data)
 		for i := 0; i < TX_CNT; i++ {
 			acct[i].accountIdx, _ = fuzzConsumer.GetUint16()
@@ -60,6 +139,9 @@ func FuzzReverse(f *testing.F) {
 			acct[i].timeout, _ = fuzzConsumer.GetUint16()
 			acct[i].gasLimit, _ = fuzzConsumer.GetUint16()
 			acct[i].fees, _ = fuzzConsumer.GetUint16()
+			for j := 0; j < VARIATIONS; j++ {
+				priorities[i][j].priority, _ = fuzzConsumer.GetUint16()
+			}
 		}
 		encodingConfig := testutils.CreateTestEncodingConfig()
 
@@ -73,29 +155,6 @@ func FuzzReverse(f *testing.F) {
 			SignerExtractor: signeradaptors.NewDefaultAdapter(),
 		}
 
-		//Sort in priority nonce should be strictly ordered and deterministic
-		//This means that two copies of lanes should always produce same ordering when same txs are inserted
-		//(should also not depend on insertion order, since we require strict ordering and no ties after all tiebreakers are applied)
-		//one exception that makes insertion order matter is when two txs from same sender with same sequence is sent
-		//the latter one will override previous one in this case, which we want to avoid, so adjust sequence here for simplicity
-		var seen map[uint16]map[uint16]bool = make(map[uint16]map[uint16]bool)
-		for i := 0; i < TX_CNT; i++ {
-			acct[i].accountIdx %= ACCT_CNT
-			idxMap, ok := seen[acct[i].accountIdx]
-			if !ok {
-				seen[acct[i].accountIdx] = make(map[uint16]bool)
-				idxMap = seen[acct[i].accountIdx]
-			}
-			if _, ok = idxMap[acct[i].nonce]; ok {
-				for k := 0; k <= math.MaxUint16; k++ {
-					if _, ok = idxMap[uint16(k)]; !ok {
-						acct[i].nonce = uint16(k)
-						break
-					}
-				}
-			}
-			idxMap[acct[i].nonce] = true
-		}
 		txs := make([]authsigning.Tx, TX_CNT)
 
 		for i := 0; i < TX_CNT; i++ {
@@ -114,20 +173,19 @@ func FuzzReverse(f *testing.F) {
 			txs[i] = tx
 		}
 
-		resps := make([]*cometabci.ResponsePrepareProposal, COPIES)
-
-		for i := 0; i < COPIES; i++ {
-			defaultLane := defaultlane.NewDefaultLane(cfg)
-			mempool := block.NewLanedMempool(logger, false, defaultLane)
-			rand.Shuffle(TX_CNT, func(j, k int) {
-				txs[j], txs[k] = txs[k], txs[j]
-			})
-			for j := 0; j < TX_CNT; j++ {
-				if err := defaultLane.Insert(sdk.Context{}, txs[j]); err != nil {
-					t.Errorf("unexpected insertion error")
-				}
+		resps := make([]*cometabci.ResponsePrepareProposal, VARIATIONS)
+		for i := 0; i < VARIATIONS; i++ {
+			//We reconstruct lane from scratch each time to prevent removeTx in prepareProposalHandler from messing up mempool
+			dctx := DynamicContext {
+				make(map[string]map[uint64]uint16),
 			}
-			ctx := testutil.DefaultContextWithDB(t, storetypes.NewKVStoreKey("test"), storetypes.NewTransientStoreKey("transient_test1")).Ctx.WithIsCheckTx(true)
+			dynamicLane := NewDynamicPriorityLane(cfg, dctx, t)
+			mempool := block.NewLanedMempool(logger, false, dynamicLane)
+			ctx := testutil.DefaultContextWithDB(
+				t,
+				storetypes.NewKVStoreKey("test"), 
+				storetypes.NewTransientStoreKey("transient_test1"),
+			).Ctx.WithIsCheckTx(true)
 			ctx = ctx.WithConsensusParams(
 				tmprototypes.ConsensusParams{
 					Block: &tmprototypes.BlockParams{
@@ -143,13 +201,30 @@ func FuzzReverse(f *testing.F) {
 				mempool,
 			)
 			prepareProposalHandler := proposalHandler.PrepareProposalHandler()
+			for j := 0; j < TX_CNT; j++ {
+				sender, sequence, err := getTxSenderInfo(txs[j])
+				if err != nil {
+					t.Errorf("unexpected tx sender info error")
+				}
+				senderPriority, ok := dctx.DynamicPriority[sender]
+				if !ok {
+					dctx.DynamicPriority[sender] = make(map[uint64]uint16)
+					senderPriority, _ = dctx.DynamicPriority[sender]
+				}
+				senderPriority[sequence] = priorities[j][0].priority
+				if dynamicLane.Insert(ctx, txs[j]) != nil {
+					t.Errorf("unexpected insertion error")
+				}
+				//change priority between Insert and Select (this is no-op first iter)
+				dctx.DynamicPriority[sender][sequence] = priorities[j][i].priority
+			}
 			resp, err := prepareProposalHandler(ctx, &cometabci.RequestPrepareProposal{Height: 2})
 			if err != nil {
 				t.Errorf("prepare proposal failed")
 			}
 			resps[i] = resp
 		}
-		for i := 1; i < COPIES; i++ {
+		for i := 1; i < VARIATIONS; i++ {
 			if !reflect.DeepEqual(resps[0].Txs, resps[i].Txs) {
 				for j := 0; j < len(resps[0].Txs); j++ {
 					t.Log(encodingConfig.TxConfig.TxDecoder()(resps[0].Txs[j]))
